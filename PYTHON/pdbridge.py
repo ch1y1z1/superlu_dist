@@ -49,6 +49,43 @@ def setup_pdbridge(sp, INT64):
     sp.pdbridge_free.restype = None
     sp.pdbridge_free.argtypes = [ctypes.POINTER(ctypes.c_void_p)]
 
+    # Optional native complex128 bridge exported by pzbridge.c.
+    if hasattr(sp, "pzbridge_init"):
+        sp.pzbridge_init.restype = None
+        if INT64 == 0:
+            sp.pzbridge_init.argtypes = [
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.POINTER(ctypes.c_int),
+                ctypes.POINTER(ctypes.c_int),
+                ctypes.c_void_p,
+                ctypes.POINTER(ctypes.c_void_p),
+                ctypes.c_int,
+                ctypes.POINTER(ctypes.c_char_p),
+            ]
+        else:
+            sp.pzbridge_init.argtypes = [
+                ctypes.c_int,
+                ctypes.c_int64,
+                ctypes.c_int64,
+                ctypes.c_int64,
+                ctypes.POINTER(ctypes.c_int64),
+                ctypes.POINTER(ctypes.c_int64),
+                ctypes.c_void_p,
+                ctypes.POINTER(ctypes.c_void_p),
+                ctypes.c_int,
+                ctypes.POINTER(ctypes.c_char_p),
+            ]
+
+        sp.pzbridge_factor.restype = None
+        sp.pzbridge_factor.argtypes = [ctypes.POINTER(ctypes.c_void_p)]
+        sp.pzbridge_solve.restype = None
+        sp.pzbridge_solve.argtypes = [ctypes.POINTER(ctypes.c_void_p), ctypes.c_int, ctypes.c_void_p]
+        sp.pzbridge_free.restype = None
+        sp.pzbridge_free.argtypes = [ctypes.POINTER(ctypes.c_void_p)]
+
 def load_library(INT64):
     # Check platform and set library extension
     if platform == "linux" or platform == "linux2":

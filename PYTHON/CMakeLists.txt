@@ -7,9 +7,9 @@ set(sources
     pdbridge.c
     )
 
-# if(enable_complex16)
-#   list(APPEND sources pzbridge.h pzbridge.c)
-# endif()  
+if(enable_complex16)
+    list(APPEND sources pzbridge.h pzbridge.c)
+endif()
 
 add_library(superlu_dist_python ${sources})
 get_target_property(superlu_dist_version superlu_dist VERSION)

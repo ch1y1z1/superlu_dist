@@ -2,7 +2,6 @@ import numpy as np
 import os
 import ctypes
 import scipy
-from scipy.sparse.linalg import splu
 import time
 import sys
 import mpi4py
@@ -26,6 +25,7 @@ CONTROL_FILE=os.getenv("CONTROL_FILE", "control.txt")
 DATA_FILE=os.getenv("DATA_FILE", "data.bin")
 RESULT_FILE=os.getenv("RESULT_FILE", "result.bin")  
 poll_interval = 0.001
+bridge_mode = "real"
 
 
 # Ensure the file exists; if not, wait a moment and try again.
@@ -44,31 +44,47 @@ while True:
         #####  read in the matrix by rank 0
         if rank == 0:
             with open(DATA_FILE, "rb") as f:
-                m,INT64,algo3d = pickle.load(f)
+                payload = pickle.load(f)
+                if len(payload) >= 4:
+                    m, INT64, algo3d, use_native_complex = payload[:4]
+                else:
+                    m, INT64, algo3d = payload
+                    use_native_complex = False
             n=(m.shape)[0]    
             INT64 = comm.bcast(INT64, root=0)
             algo3d = comm.bcast(algo3d, root=0)
+            use_native_complex = comm.bcast(bool(use_native_complex), root=0)
             n = comm.bcast(n, root=0)
         else:
             INT64=-1
             algo3d=-1
+            use_native_complex = False
             n=-1
             INT64 = comm.bcast(INT64, root=0)
             algo3d = comm.bcast(algo3d, root=0)
+            use_native_complex = comm.bcast(bool(use_native_complex), root=0)
             n = comm.bcast(n, root=0)
             a = scipy.sparse.random(1, 1, density=1)
-            m = (a.T @ a)     
+            m = (a.T @ a)
+            if use_native_complex:
+                m = m.astype(np.complex128)
 
         m_csc = m.tocsc()
         if(INT64==0):
             rowind = m_csc.indices.astype(np.int32)
             colptr = m_csc.indptr.astype(np.int32) 
-            nzval = m_csc.data.astype(np.float64)  
+            if use_native_complex:
+                nzval = np.ascontiguousarray(m_csc.data, dtype=np.complex128)
+            else:
+                nzval = m_csc.data.astype(np.float64)
             nnz=m.nnz
         else:
             rowind = m_csc.indices.astype(np.int64)
             colptr = m_csc.indptr.astype(np.int64) 
-            nzval = m_csc.data.astype(np.float64)  
+            if use_native_complex:
+                nzval = np.ascontiguousarray(m_csc.data, dtype=np.complex128)
+            else:
+                nzval = m_csc.data.astype(np.float64)
             nnz=np.int64(m.nnz)
             n = np.int64(n)
 
@@ -99,78 +115,142 @@ while True:
         sp = pdbridge.load_library(INT64)
         ####################### initialization
         pyobj = ctypes.c_void_p()
-        if(INT64==0):
-            sp.pdbridge_init(
-                algo3d,
-                n,                              # int_t m
-                n,                              # int_t n
-                nnz,                            # int_t nnz
-                rowind.ctypes.data_as(ctypes.POINTER(ctypes.c_int)),  # int_t *rowind
-                colptr.ctypes.data_as(ctypes.POINTER(ctypes.c_int)),  # int_t *colptr
-                nzval.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),  # double *nzval
-                ctypes.byref(pyobj),            # void **pyobj
-                argc,                           # int argc
-                argv_ctypes                     # char *argv[]
-            )
+        if use_native_complex:
+            if algo3d != 0:
+                raise RuntimeError("native complex superlu_dist worker currently supports algo3d=0 only")
+            if not hasattr(sp, "pzbridge_init"):
+                raise RuntimeError(
+                    "libsuperlu_dist_python missing native complex bridge symbols (pzbridge_*). "
+                    "Rebuild superlu_dist PYTHON target with complex16 enabled."
+                )
+
+            if(INT64==0):
+                sp.pzbridge_init(
+                    algo3d,
+                    n,
+                    n,
+                    nnz,
+                    rowind.ctypes.data_as(ctypes.POINTER(ctypes.c_int)),
+                    colptr.ctypes.data_as(ctypes.POINTER(ctypes.c_int)),
+                    nzval.ctypes.data_as(ctypes.c_void_p),
+                    ctypes.byref(pyobj),
+                    argc,
+                    argv_ctypes,
+                )
+            else:
+                sp.pzbridge_init(
+                    algo3d,
+                    n,
+                    n,
+                    nnz,
+                    rowind.ctypes.data_as(ctypes.POINTER(ctypes.c_int64)),
+                    colptr.ctypes.data_as(ctypes.POINTER(ctypes.c_int64)),
+                    nzval.ctypes.data_as(ctypes.c_void_p),
+                    ctypes.byref(pyobj),
+                    argc,
+                    argv_ctypes,
+                )
+            bridge_mode = "complex"
         else:
-            sp.pdbridge_init(
-                algo3d,
-                n,                              # int_t m
-                n,                              # int_t n
-                nnz,                            # int_t nnz
-                rowind.ctypes.data_as(ctypes.POINTER(ctypes.c_int64)),  # int_t *rowind
-                colptr.ctypes.data_as(ctypes.POINTER(ctypes.c_int64)),  # int_t *colptr
-                nzval.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),  # double *nzval
-                ctypes.byref(pyobj),            # void **pyobj
-                argc,                           # int argc
-                argv_ctypes                     # char *argv[]
-            )    
+            if(INT64==0):
+                sp.pdbridge_init(
+                    algo3d,
+                    n,                              # int_t m
+                    n,                              # int_t n
+                    nnz,                            # int_t nnz
+                    rowind.ctypes.data_as(ctypes.POINTER(ctypes.c_int)),  # int_t *rowind
+                    colptr.ctypes.data_as(ctypes.POINTER(ctypes.c_int)),  # int_t *colptr
+                    nzval.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),  # double *nzval
+                    ctypes.byref(pyobj),            # void **pyobj
+                    argc,                           # int argc
+                    argv_ctypes                     # char *argv[]
+                )
+            else:
+                sp.pdbridge_init(
+                    algo3d,
+                    n,                              # int_t m
+                    n,                              # int_t n
+                    nnz,                            # int_t nnz
+                    rowind.ctypes.data_as(ctypes.POINTER(ctypes.c_int64)),  # int_t *rowind
+                    colptr.ctypes.data_as(ctypes.POINTER(ctypes.c_int64)),  # int_t *colptr
+                    nzval.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),  # double *nzval
+                    ctypes.byref(pyobj),            # void **pyobj
+                    argc,                           # int argc
+                    argv_ctypes                     # char *argv[]
+                )
+            bridge_mode = "real"
 
     elif(flag=="factor"):
         ####################### factor 
-        sp.pdbridge_factor(
-            ctypes.byref(pyobj),            # void **pyobj
-        )
+        if bridge_mode == "complex":
+            sp.pzbridge_factor(
+                ctypes.byref(pyobj),
+            )
+        else:
+            sp.pdbridge_factor(
+                ctypes.byref(pyobj),            # void **pyobj
+            )
     elif(flag=="solve"):              
         ####################### solve 
         #####  read in the RHS by rank 0
-        nrhs=-1  
-        xb = np.random.rand(1).astype(np.float64) 
+        nrhs=-1
+        if bridge_mode == "complex":
+            xb = np.random.rand(1).astype(np.complex128)
+        else:
+            xb = np.random.rand(1).astype(np.float64)
         if rank == 0:
             with open(DATA_FILE, "rb") as f:
                 xb,nrhs = pickle.load(f)
-            xb = np.ascontiguousarray(xb, dtype=np.float64)            
+            if bridge_mode == "complex":
+                xb = np.asfortranarray(np.asarray(xb, dtype=np.complex128))
+            else:
+                xb = np.ascontiguousarray(xb, dtype=np.float64)
 
-        sp.pdbridge_solve(
-            ctypes.byref(pyobj),            # void **pyobj
-            nrhs,                           # int nrhs
-            xb.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),  # double *nzval
-        )
+        if bridge_mode == "complex":
+            sp.pzbridge_solve(
+                ctypes.byref(pyobj),
+                nrhs,
+                xb.ctypes.data_as(ctypes.c_void_p),
+            )
+        else:
+            sp.pdbridge_solve(
+                ctypes.byref(pyobj),            # void **pyobj
+                nrhs,                           # int nrhs
+                xb.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),  # double *nzval
+            )
         if rank == 0:
             with open(RESULT_FILE, "wb") as f:
                 pickle.dump(xb, f)
 
     elif(flag=="logdet"):
         ####################### log-determinant 
-        sign = ctypes.c_int(1)
-        logdet = ctypes.c_double(0.0)
-        sp.pdbridge_logdet(
-            ctypes.byref(pyobj),            # void **pyobj
-            ctypes.byref(sign),                           # int nrhs
-            ctypes.byref(logdet),  # double *nzval
-        )
-        if rank == 0:
-            with open(RESULT_FILE, "wb") as f:
-                pickle.dump((sign.value, logdet.value),f)
+        if bridge_mode == "complex":
+            if rank == 0:
+                with open(RESULT_FILE, "wb") as f:
+                    pickle.dump((None, None), f)
+        else:
+            sign = ctypes.c_int(1)
+            logdet = ctypes.c_double(0.0)
+            sp.pdbridge_logdet(
+                ctypes.byref(pyobj),            # void **pyobj
+                ctypes.byref(sign),                           # int nrhs
+                ctypes.byref(logdet),  # double *nzval
+            )
+            if rank == 0:
+                with open(RESULT_FILE, "wb") as f:
+                    pickle.dump((sign.value, logdet.value),f)
 
-        if(rank==0):
-            print("superlu logdet:",sign.value,logdet.value)
-            # sign, logdet = np.linalg.slogdet(m.toarray())
-            # print("numpy logdet:",int(sign),logdet)     
+            if(rank==0):
+                print("superlu logdet:",sign.value,logdet.value)
+                # sign, logdet = np.linalg.slogdet(m.toarray())
+                # print("numpy logdet:",int(sign),logdet)
 
     elif(flag=="free"):
         ####################### free stuff
-        sp.pdbridge_free(ctypes.byref(pyobj))
+        if bridge_mode == "complex":
+            sp.pzbridge_free(ctypes.byref(pyobj))
+        else:
+            sp.pdbridge_free(ctypes.byref(pyobj))
     elif(flag=="terminate"):      
         break
 
